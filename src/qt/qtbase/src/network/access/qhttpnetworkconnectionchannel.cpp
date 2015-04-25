@@ -133,10 +133,10 @@ void QHttpNetworkConnectionChannel::init()
     qRegisterMetaType<QAbstractSocket::SocketError>();
     QObject::connect(socket, SIGNAL(disconnected()),
                      this, SLOT(_q_disconnected()),
-                     Qt::QueuedConnection);
+                     Qt::DirectConnection);
     QObject::connect(socket, SIGNAL(error(QAbstractSocket::SocketError)),
                      this, SLOT(_q_error(QAbstractSocket::SocketError)),
-                     Qt::QueuedConnection);
+                     Qt::DirectConnection);
 
 
 #ifndef QT_NO_NETWORKPROXY
