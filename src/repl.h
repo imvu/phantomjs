@@ -30,7 +30,7 @@
 #ifndef REPL_H
 #define REPL_H
 
-#include <QWebFrame>
+#include <QtWebKitWidgets/QWebFrame>
 
 #include "phantom.h"
 
@@ -57,6 +57,9 @@ class REPL: public QObject
 public:
     static bool instanceExists();
     static REPL *getInstance(QWebFrame *webframe = NULL, Phantom *parent = NULL);
+
+    Q_INVOKABLE QString _getClassName(QObject *obj) const;
+    Q_INVOKABLE QStringList _enumerateCompletions(QObject *obj) const;
 
 private:
     REPL(QWebFrame *webframe, Phantom *parent);

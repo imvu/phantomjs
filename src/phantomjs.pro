@@ -1,13 +1,23 @@
+
+if(!equals(QT_MAJOR_VERSION, 5)|!equals(QT_MINOR_VERSION, 3)) {
+    error("This program can only be compiled with Qt 5.3.x.")
+}
+
 TEMPLATE = app
 TARGET = phantomjs
-QT += network webkit
+QT += network webkitwidgets
 CONFIG += console
 
 DESTDIR = ../bin
 
-RESOURCES = phantomjs.qrc
+RESOURCES = phantomjs.qrc \
+    ghostdriver/ghostdriver.qrc
 
-HEADERS += csconverter.h \
+!winrt:!win32: {
+    QTPLUGIN += qphantom
+}
+
+HEADERS += \
     phantom.h \
     callback.h \
     webpage.h \
@@ -22,15 +32,15 @@ HEADERS += csconverter.h \
     terminal.h \
     encoding.h \
     config.h \
+    childprocess.h \
     repl.h \
-    replcompletable.h
+    crashdump.h
 
 SOURCES += phantom.cpp \
     callback.cpp \
     webpage.cpp \
     webserver.cpp \
     main.cpp \
-    csconverter.cpp \
     utils.cpp \
     networkaccessmanager.cpp \
     cookiejar.cpp \
@@ -40,22 +50,25 @@ SOURCES += phantom.cpp \
     terminal.cpp \
     encoding.cpp \
     config.cpp \
+    childprocess.cpp \
     repl.cpp \
-    replcompletable.cpp
+    crashdump.cpp
 
-OTHER_FILES += usage.txt \
+OTHER_FILES += \
     bootstrap.js \
     configurator.js \
     modules/fs.js \
     modules/webpage.js \
     modules/webserver.js \
+    modules/child_process.js \
+    modules/cookiejar.js \
     repl.js
 
-include(gif/gif.pri)
 include(mongoose/mongoose.pri)
 include(linenoise/linenoise.pri)
+include(qcommandline/qcommandline.pri)
 
-linux*|mac {
+linux*|mac|openbsd* {
     INCLUDEPATH += breakpad/src
 
     SOURCES += breakpad/src/client/minidump_file_writer.cc \
@@ -103,6 +116,18 @@ mac {
 # Uncomment to build a Mac OS X Universal Binary (i.e. x86 + ppc)
 #    CONFIG += x86 ppc
 }
-CONFIG(static) {
-    DEFINES += STATIC_BUILD
+
+win32-msvc* {
+    LIBS += -lCrypt32 -llibxml2
+    INCLUDEPATH += breakpad/src
+    SOURCES += breakpad/src/client/windows/handler/exception_handler.cc \
+      breakpad/src/client/windows/crash_generation/crash_generation_client.cc \
+      breakpad/src/common/windows/guid_string.cc
+    CONFIG(static) {
+        DEFINES += STATIC_BUILD
+    }
+}
+
+openbsd* {
+    LIBS += -L/usr/X11R6/lib
 }

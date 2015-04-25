@@ -9,7 +9,7 @@ describe("WebServer constructor", function() {
     });
 });
 
-var expectedPostData = false;
+var expectedPostData = false, expectedBinaryData = false;
 
 function checkRequest(request, response) {
     expect(typeof request).toEqual('object');
@@ -31,9 +31,9 @@ function checkRequest(request, response) {
     if (expectedPostData !== false) {
         expect(request.method).toEqual("POST");
         expect(request.hasOwnProperty('post')).toBeTruthy();
-        console.log("request.post => " + JSON.stringify(request.post, null, 4));
-        console.log("expectedPostData => " + JSON.stringify(expectedPostData, null, 4));
-        console.log("request.headers => " + JSON.stringify(request.headers, null, 4));
+        jasmine.log("request.post => " + JSON.stringify(request.post, null, 4));
+        jasmine.log("expectedPostData => " + JSON.stringify(expectedPostData, null, 4));
+        jasmine.log("request.headers => " + JSON.stringify(request.headers, null, 4));
         if (request.headers["Content-Type"] && request.headers["Content-Type"] === "application/x-www-form-urlencoded") {
             expect(typeof request.post).toEqual('object');
             expect(request.post).toEqual(expectedPostData);
@@ -47,7 +47,13 @@ function checkRequest(request, response) {
         expectedPostData = false;
     }
 
-    response.write("request handled");
+    if (expectedBinaryData !== false) {
+        response.setEncoding('binary');
+        response.write(expectedBinaryData);
+        expectedBinaryData = false;
+    } else {
+        response.write("request handled");
+    }
     response.close();
 }
 
@@ -89,13 +95,13 @@ describe("WebServer object", function() {
     });
     it("should be able to listen to some port", function() {
         //NOTE: this can fail if the port is already being listend on...
-        expect(server.listen("12345", checkRequest)).toEqual(true);
-        expect(server.port).toEqual("12345");
+        expect(server.listen("1337", checkRequest)).toEqual(true);
+        expect(server.port).toEqual("1337");
     });
 
     it("should handle requests", function() {
         var page = require('webpage').create();
-        var url = "http://localhost:12345/foo/bar.php?asdf=true";
+        var url = "http://localhost:1337/foo/bar.php?asdf=true";
         var handled = false;
         runs(function() {
             expect(handled).toEqual(false);
@@ -115,7 +121,7 @@ describe("WebServer object", function() {
 
     it("should handle post requests ('Content-Type' = 'application/x-www-form-urlencoded')", function() {
         var page = require('webpage').create();
-        var url = "http://localhost:12345/foo/bar.txt?asdf=true";
+        var url = "http://localhost:1337/foo/bar.txt?asdf=true";
         //note: sorted by key (map)
         expectedPostData = {'answer' : "42", 'universe' : "expanding"};
         var handled = false;
@@ -137,7 +143,7 @@ describe("WebServer object", function() {
 
     it("should handle post requests ('Content-Type' = 'ANY')", function() {
         var page = require('webpage').create();
-        var url = "http://localhost:12345/foo/bar.txt?asdf=true";
+        var url = "http://localhost:1337/foo/bar.txt?asdf=true";
         //note: sorted by key (map)
         expectedPostData = {'answer' : "42", 'universe' : "expanding"};
         var handled = false;
@@ -156,4 +162,31 @@ describe("WebServer object", function() {
             expect(handled).toEqual(true);
         });
     });
+
+    xit("should handle binary data", function() {
+        var page = require('webpage').create();
+        var url = "http://localhost:1337/";
+        var fs = require('fs');
+        expectedBinaryData = fs.read('phantomjs.png', 'b');
+        var handled = false;
+        runs(function() {
+            expect(handled).toEqual(false);
+            page.open(url, 'get', function(status) {
+                expect(status == 'success').toEqual(true);
+                function checkImg() {
+                    var img = document.querySelector('img');
+                    return (img) && (img.width == 200) && (img.height == 200);
+                }
+                expect(page.evaluate(checkImg)).toEqual(true);
+                handled = true;
+            });
+        });
+
+        waits(50);
+
+        runs(function() {
+            expect(handled).toEqual(true);
+        });
+    });
+
 });

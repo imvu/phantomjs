@@ -29,10 +29,12 @@
 
 #include "repl.h"
 
-#include <QDesktopServices>
+#include <QStandardPaths>
 #include <QTimer>
 #include <QDir>
 #include <QRegExp>
+#include <QMetaMethod>
+#include <QMetaProperty>
 
 #include "consts.h"
 #include "terminal.h"
@@ -78,6 +80,52 @@ REPL *REPL::getInstance(QWebFrame *webframe, Phantom *parent)
     return singleton;
 }
 
+QString REPL::_getClassName(QObject *obj) const
+{
+    const QMetaObject *meta = obj->metaObject();
+
+    return QString::fromLatin1(meta->className());
+}
+
+QStringList REPL::_enumerateCompletions(QObject *obj) const
+{
+    const QMetaObject *meta = obj->metaObject();
+    QMap<QString, bool> completions;
+
+    // List up slots, signals, and invokable methods
+    const int methodOffset = meta->methodOffset();
+    const int methodCount = meta->methodCount();
+    for (int i = methodOffset; i < methodCount; i++) {
+        const QString name = QString::fromLatin1(meta->method(i).methodSignature());
+        // Ignore methods starting with underscores
+        if (name.startsWith('_')) {
+            continue;
+        }
+        // Keep only up to, but not including, first paren
+        const int cutoff = name.indexOf('(');
+        completions.insert((0 < cutoff ? name.left(cutoff) : name), true);
+    }
+
+    // List up properties
+    const int propertyOffset = meta->propertyOffset();
+    const int propertyCount = meta->propertyCount();
+    for (int i = propertyOffset; i < propertyCount; i++) {
+        const QMetaProperty prop = meta->property(i);
+        // Ignore non-scriptable properties
+        if (!prop.isScriptable()) {
+            continue;
+        }
+        const QString name = QString::fromLatin1(prop.name());
+        // Ignore properties starting with underscores
+        if (name.startsWith('_')) {
+            continue;
+        }
+        completions.insert(name, true);
+    }
+
+    return completions.uniqueKeys();
+}
+
 // private:
 REPL::REPL(QWebFrame *webframe, Phantom *parent)
     : QObject(parent),
@@ -86,11 +134,11 @@ REPL::REPL(QWebFrame *webframe, Phantom *parent)
     m_webframe = webframe;
     m_parentPhantom = parent;
     m_historyFilepath = QString("%1/%2").arg(
-                QDesktopServices::storageLocation(QDesktopServices::DataLocation),
+                QStandardPaths::writableLocation(QStandardPaths::DataLocation),
                 HISTORY_FILENAME).toLocal8Bit();
 
     // Ensure the location for the history file exists
-    QDir().mkpath(QDesktopServices::storageLocation(QDesktopServices::DataLocation));
+    QDir().mkpath(QStandardPaths::writableLocation(QStandardPaths::DataLocation));
 
     // Listen for Phantom exit(ing)
     connect(m_parentPhantom, SIGNAL(aboutToExit(int)), this, SLOT(stopLoop(int)));
@@ -100,6 +148,9 @@ REPL::REPL(QWebFrame *webframe, Phantom *parent)
 
     // Inject REPL utility functions
     m_webframe->evaluateJavaScript(Utils::readResourceFileUtf8(":/repl.js"), QString("phantomjs://repl.js"));
+
+    // Add self to JavaScript world
+    m_webframe->addToJavaScriptWindowObject("_repl", this);
 
     // Start the REPL's loop
     QTimer::singleShot(0, this, SLOT(startLoop()));

@@ -26,45 +26,24 @@
   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
   THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
+#ifdef _WIN32
+#define NOMINMAX
+#endif
 
 #include "consts.h"
 #include "utils.h"
 #include "env.h"
 #include "phantom.h"
-
-#ifdef Q_OS_LINUX
-#include "client/linux/handler/exception_handler.h"
-#endif
-#ifdef Q_OS_MAC
-#include "client/mac/handler/exception_handler.h"
-#endif
+#include "crashdump.h"
 
 #include <QApplication>
+#include <QSslSocket>
+#include <QIcon>
 
-#if QT_VERSION != QT_VERSION_CHECK(4, 8, 2)
-#error Something is wrong with the setup. Please report to the mailing list!
-#endif
-
-int main(int argc, char** argv, const char** envp)
+int main(int argc, char** argv)
 {
-#ifdef Q_OS_LINUX
-    google_breakpad::ExceptionHandler eh("/tmp", NULL, Utils::exceptionHandler, NULL, true);
-#endif
-#ifdef Q_OS_MAC
-    google_breakpad::ExceptionHandler eh("/tmp", NULL, Utils::exceptionHandler, NULL, true, NULL);
-#endif
-
+    CrashHandler crash_guard;
     QApplication app(argc, argv);
-    Phantom phantom;
-
-    // Registering an alternative Message Handler
-    Utils::printDebugMessages = phantom.printDebugMessages();
-    qInstallMsgHandler(Utils::messageHandler);
-
-#ifdef STATIC_BUILD
-    Q_INIT_RESOURCE(WebKit);
-    Q_INIT_RESOURCE(InspectorBackendStub);
-#endif
 
     app.setWindowIcon(QIcon(":/phantomjs-icon.png"));
     app.setApplicationName("PhantomJS");
@@ -72,11 +51,26 @@ int main(int argc, char** argv, const char** envp)
     app.setOrganizationDomain("www.ofilabs.com");
     app.setApplicationVersion(PHANTOMJS_VERSION_STRING);
 
-    Env::instance()->parse(envp);
+    // Registering an alternative Message Handler
+    qInstallMessageHandler(Utils::messageHandler);
 
-    phantom.init();
-    if (phantom.execute()) {
+#if defined(Q_OS_LINUX)
+    if (QSslSocket::supportsSsl()) {
+        // Don't perform on-demand loading of root certificates on Linux
+        QSslSocket::addDefaultCaCertificates(QSslSocket::systemCaCertificates());
+    }
+#endif
+
+    // Get the Phantom singleton
+    Phantom *phantom = Phantom::instance();
+
+    // Start script execution
+    if (phantom->execute()) {
         app.exec();
     }
-    return phantom.returnValue();
+
+    // End script execution: delete the phantom singleton and set execution return value
+    int retVal = phantom->returnValue();
+    delete phantom;
+    return retVal;
 }

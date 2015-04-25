@@ -95,20 +95,18 @@ exports.create = function (opts) {
     }
 
     function defineSetter(handlerName, signalName) {
-        server.__defineSetter__(handlerName, function (f) {
-            if (handlers && typeof handlers[signalName] === 'function') {
-                try {
-                    this[signalName].disconnect(handlers[signalName]);
-                } catch (e) {}
+        Object.defineProperty(server, handlerName, {
+            set: function (f) {
+                if (handlers && typeof handlers[signalName] === 'function') {
+                    try {
+                        this[signalName].disconnect(handlers[signalName]);
+                    } catch (e) {}
+                }
+                handlers[signalName] = f;
+                this[signalName].connect(handlers[signalName]);
             }
-            handlers[signalName] = f;
-            this[signalName].connect(handlers[signalName]);
         });
     }
-
-    // deep copy
-    //TODO: use this?
-//     server.settings = JSON.parse(JSON.stringify(phantom.defaultServerSettings));
 
     defineSetter("onNewRequest", "newRequest");
 

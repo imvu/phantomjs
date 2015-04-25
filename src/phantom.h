@@ -33,33 +33,37 @@
 
 #include <QPointer>
 
-#include "csconverter.h"
 #include "filesystem.h"
 #include "encoding.h"
 #include "config.h"
-#include "replcompletable.h"
 #include "system.h"
+#include "childprocess.h"
+#include "cookiejar.h"
 
 class WebPage;
+class CustomPage;
 class WebServer;
 
-class Phantom: public REPLCompletable
+class Phantom : public QObject
 {
     Q_OBJECT
-    Q_PROPERTY(QStringList args READ args)
     Q_PROPERTY(QVariantMap defaultPageSettings READ defaultPageSettings)
     Q_PROPERTY(QString libraryPath READ libraryPath WRITE setLibraryPath)
     Q_PROPERTY(QString outputEncoding READ outputEncoding WRITE setOutputEncoding)
-    Q_PROPERTY(QString scriptName READ scriptName)
     Q_PROPERTY(QVariantMap version READ version)
     Q_PROPERTY(QObject *page READ page)
+    Q_PROPERTY(bool cookiesEnabled READ areCookiesEnabled WRITE setCookiesEnabled)
+    Q_PROPERTY(QVariantList cookies READ cookies WRITE setCookies)
+    Q_PROPERTY(bool webdriverMode READ webdriverMode)
+
+private:
+    // Private constructor: the Phantom class is a singleton
+    Phantom(QObject *parent = 0);
+    void init();
 
 public:
-    Phantom(QObject *parent = 0);
+    static Phantom *instance();
     virtual ~Phantom();
-
-    void init();
-    QStringList args() const;
 
     QVariantMap defaultPageSettings() const;
 
@@ -72,22 +76,99 @@ public:
     QString libraryPath() const;
     void setLibraryPath(const QString &libraryPath);
 
-    QString scriptName() const;
-
     QVariantMap version() const;
 
-    QObject* page() const;
+    QObject *page() const;
+
+    /**
+     * Pointer to the Config loaded at startup.
+     * The configuration is determined by the commandline parameters.
+     *
+     * @brief config
+     * @return Pointer to the current Config(uration)
+     */
+    Config *config();
 
     bool printDebugMessages() const;
 
+    bool areCookiesEnabled() const;
+    void setCookiesEnabled(const bool value);
+
+    bool webdriverMode() const;
+
+    /**
+     * Create `child_process` module instance
+     */
+    Q_INVOKABLE QObject *_createChildProcess();
+
 public slots:
+    QObject *createCookieJar(const QString &filePath);
     QObject *createWebPage();
     QObject *createWebServer();
     QObject *createFilesystem();
     QObject *createSystem();
     QObject *createCallback();
-    QString loadModuleSource(const QString &name);
+    void loadModule(const QString &moduleSource, const QString &filename);
     bool injectJs(const QString &jsFilePath);
+
+    /**
+     * Allows to set cookies into the CookieJar.
+     * Pages will be able to access only the cookies they are supposed to see given their URL.
+     *
+     * Cookies are expected in the format:
+     * <pre>
+     * {
+     *   "name"     : "cookie name (string)",
+     *   "value"    : "cookie value (string)",
+     *   "domain"   : "cookie domain (string)",
+     *   "path"     : "cookie path (string, optional)",
+     *   "httponly" : "http only cookie (boolean, optional)",
+     *   "secure"   : "secure cookie (boolean, optional)",
+     *   "expires"  : "expiration date (string, GMT format, optional)"
+     * }
+     * </pre>
+     * @brief setCookies
+     * @param cookies Expects a QList of QVariantMaps
+     * @return Boolean "true" if at least 1 cookie was set
+     */
+    bool setCookies(const QVariantList &cookies);
+    /**
+     * All the Cookies in the CookieJar
+     *
+     * @see WebPage::setCookies for details on the format
+     * @brief cookies
+     * @return QList of QVariantMap cookies visible to this Page, at the current URL.
+     */
+    QVariantList cookies() const;
+    /**
+     * Add a Cookie (in QVariantMap format) into the CookieJar
+     * @see WebPage::setCookies for details on the format
+     * @brief addCookie
+     * @param cookie Cookie in QVariantMap format
+     * @return Boolean "true" if cookie was added
+     */
+    bool addCookie(const QVariantMap &cookie);
+    /**
+     * Delete cookie by name from the CookieJar
+     * @brief deleteCookie
+     * @param cookieName Name of the Cookie to delete
+     * @return Boolean "true" if cookie was deleted
+     */
+    bool deleteCookie(const QString &cookieName);
+    /**
+     * Delete All Cookies from the CookieJar
+     * @brief clearCookies
+     */
+    void clearCookies();
+
+    /**
+     * Set the application proxy
+     * @brief setProxy
+     * @param ip The proxy ip
+     * @param port The proxy port
+     * @param proxyType The type of this proxy
+     */
+    void setProxy(const QString &ip, const qint64 &port = 80, const QString &proxyType = "http", const QString &user = NULL, const QString &password = NULL);
 
     // exit() will not exit in debug mode. debugExit() will always exit.
     void exit(int code = 0);
@@ -100,9 +181,9 @@ private slots:
     void printConsoleMessage(const QString &msg);
 
     void onInitialized();
+
 private:
     void doExit(int code);
-    virtual void initCompletions();
 
     Encoding m_scriptFileEnc;
     WebPage *m_page;
@@ -112,9 +193,13 @@ private:
     QVariantMap m_defaultPageSettings;
     FileSystem *m_filesystem;
     System *m_system;
+    ChildProcess *m_childprocess;
     QList<QPointer<WebPage> > m_pages;
     QList<QPointer<WebServer> > m_servers;
     Config m_config;
+    CookieJar *m_defaultCookieJar;
+
+    friend class CustomPage;
 };
 
 #endif // PHANTOM_H

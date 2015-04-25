@@ -34,7 +34,11 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QFile>
-#include <QWebPage>
+#include <QtWebKitWidgets/QWebPage>
+#include <QDebug>
+#include <QMetaObject>
+#include <QMetaProperty>
+#include <QStandardPaths>
 
 #include "consts.h"
 #include "terminal.h"
@@ -44,30 +48,40 @@
 #include "repl.h"
 #include "system.h"
 #include "callback.h"
+#include "cookiejar.h"
+#include "childprocess.h"
 
+static Phantom *phantomInstance = NULL;
 
-// public:
+// private:
 Phantom::Phantom(QObject *parent)
-    : REPLCompletable(parent)
+    : QObject(parent)
     , m_terminated(false)
     , m_returnValue(0)
     , m_filesystem(0)
     , m_system(0)
+    , m_childprocess(0)
 {
-    // second argument: script name
     QStringList args = QApplication::arguments();
 
-    // Skip the first argument, i.e. the application executable (phantomjs).
-    args.removeFirst();
-
+    // Prepare the configuration object based on the command line arguments.
+    // Because this object will be used by other classes, it needs to be ready ASAP.
     m_config.init(&args);
+    // Apply debug configuration as early as possible
+    Utils::printDebugMessages = m_config.printDebugMessages();
 }
 
 void Phantom::init()
 {
     if (m_config.helpFlag()) {
+        Terminal::instance()->cout(QString("%1").arg(m_config.helpText()));
+        Terminal::instance()->cout("Any of the options that accept boolean values ('true'/'false') can also accept 'yes'/'no'.");
+        Terminal::instance()->cout("");
+        Terminal::instance()->cout("Without any argument, PhantomJS will launch in interactive mode (REPL).");
+        Terminal::instance()->cout("");
+        Terminal::instance()->cout("Documentation can be found at the web site, http://phantomjs.org.");
+        Terminal::instance()->cout("");
         m_terminated = true;
-        Utils::showUsage();
         return;
     }
 
@@ -83,26 +97,27 @@ void Phantom::init()
         return;
     }
 
-    m_page = new WebPage(this, &m_config, QUrl::fromLocalFile(m_config.scriptFile()));
+    // Initialize the CookieJar
+    m_defaultCookieJar = new CookieJar(m_config.cookiesFile());
+
+    QWebSettings::setOfflineWebApplicationCachePath(QStandardPaths::writableLocation(QStandardPaths::DataLocation));
+    if (m_config.offlineStoragePath().isEmpty()) {
+        QWebSettings::setOfflineStoragePath(QStandardPaths::writableLocation(QStandardPaths::DataLocation));
+    } else {
+        QWebSettings::setOfflineStoragePath(m_config.offlineStoragePath());
+    }
+    if (m_config.offlineStorageDefaultQuota() > 0) {
+        QWebSettings::setOfflineStorageDefaultQuota(m_config.offlineStorageDefaultQuota());
+    }
+
+    m_page = new WebPage(this, QUrl::fromLocalFile(m_config.scriptFile()));
+    m_page->setCookieJar(m_defaultCookieJar);
     m_pages.append(m_page);
 
-    if (m_config.proxyHost().isEmpty()) {
-        QNetworkProxyFactory::setUseSystemConfiguration(true);
-    } else {
-        QString proxyType = m_config.proxyType();
-        QNetworkProxy::ProxyType networkProxyType = QNetworkProxy::HttpProxy;
-
-        if (proxyType == "socks5") {
-            networkProxyType = QNetworkProxy::Socks5Proxy;
-        }
-
-        if(!m_config.proxyAuthUser().isEmpty() && !m_config.proxyAuthPass().isEmpty()) {
-            QNetworkProxy proxy(networkProxyType, m_config.proxyHost(), m_config.proxyPort(), m_config.proxyAuthUser(), m_config.proxyAuthPass());
-            QNetworkProxy::setApplicationProxy(proxy);
-        } else {
-            QNetworkProxy proxy(networkProxyType, m_config.proxyHost(), m_config.proxyPort());
-            QNetworkProxy::setApplicationProxy(proxy);
-        }
+    // Set up proxy if required
+    QString proxyType = m_config.proxyType();
+    if (proxyType != "none") {
+        setProxy(m_config.proxyHost(), m_config.proxyPort(), proxyType, m_config.proxyAuthUser(), m_config.proxyAuthPass());
     }
 
     // Set output encoding
@@ -122,18 +137,25 @@ void Phantom::init()
     m_defaultPageSettings[PAGE_SETTINGS_USER_AGENT] = QVariant::fromValue(m_page->userAgent());
     m_defaultPageSettings[PAGE_SETTINGS_LOCAL_ACCESS_REMOTE] = QVariant::fromValue(m_config.localToRemoteUrlAccessEnabled());
     m_defaultPageSettings[PAGE_SETTINGS_WEB_SECURITY_ENABLED] = QVariant::fromValue(m_config.webSecurityEnabled());
+    m_defaultPageSettings[PAGE_SETTINGS_JS_CAN_OPEN_WINDOWS] = QVariant::fromValue(m_config.javascriptCanOpenWindows());
+    m_defaultPageSettings[PAGE_SETTINGS_JS_CAN_CLOSE_WINDOWS] = QVariant::fromValue(m_config.javascriptCanCloseWindows());
     m_page->applySettings(m_defaultPageSettings);
 
     setLibraryPath(QFileInfo(m_config.scriptFile()).dir().absolutePath());
 }
 
-Phantom::~Phantom()
-{
+// public:
+Phantom *Phantom::instance() {
+    if (NULL == phantomInstance) {
+        phantomInstance = new Phantom();
+        phantomInstance->init();
+    }
+    return phantomInstance;
 }
 
-QStringList Phantom::args() const
+Phantom::~Phantom()
 {
-    return m_config.scriptArgs();
+    // Nothing to do: cleanup is handled by QObject relationships
 }
 
 QVariantMap Phantom::defaultPageSettings() const
@@ -156,21 +178,54 @@ bool Phantom::execute()
     if (m_terminated)
         return false;
 
-    if (m_config.scriptFile().isEmpty()) {
-        // REPL mode requested
+#ifndef QT_NO_DEBUG_OUTPUT
+    qDebug() << "Phantom - execute: Configuration";
+    const QMetaObject* configMetaObj = m_config.metaObject();
+    for (int i = 0, ilen = configMetaObj->propertyCount(); i < ilen; ++i) {
+        qDebug() << "    " << i << configMetaObj->property(i).name() << ":" << m_config.property(configMetaObj->property(i).name()).toString();
+    }
+
+    qDebug() << "Phantom - execute: Script & Arguments";
+    qDebug() << "    " << "script:" << m_config.scriptFile();
+    QStringList args = m_config.scriptArgs();
+    for (int i = 0, ilen = args.length(); i < ilen; ++i) {
+        qDebug() << "    " << i << "arg:" << args.at(i);
+    }
+#endif
+
+    if (m_config.isWebdriverMode()) {                                   // Remote WebDriver mode requested
+        qDebug() << "Phantom - execute: Starting Remote WebDriver mode";
+
+        if (!Utils::injectJsInFrame(":/ghostdriver/main.js", QString(), m_scriptFileEnc, QDir::currentPath(), m_page->mainFrame(), true)) {
+            m_returnValue = -1;
+            return false;
+        }
+    } else if (m_config.scriptFile().isEmpty()) {                       // REPL mode requested
+        qDebug() << "Phantom - execute: Starting REPL mode";
+
+        // REPL is only valid for javascript
+        const QString &scriptLanguage = m_config.scriptLanguage();
+        if (scriptLanguage != "javascript" && !scriptLanguage.isNull()) {
+            QString errMessage = QString("Unsupported language: %1").arg(scriptLanguage);
+            Terminal::instance()->cerr(errMessage);
+            qWarning("%s", qPrintable(errMessage));
+            return false;
+        }
+
         // Create the REPL: it will launch itself, no need to store this variable.
         REPL::getInstance(m_page->mainFrame(), this);
-    } else {
-        // Load the User Script
+    } else {                                                            // Load the User Script
+        qDebug() << "Phantom - execute: Starting normal mode";
+
         if (m_config.debug()) {
             // Debug enabled
-            if (!Utils::loadJSForDebug(m_config.scriptFile(), m_scriptFileEnc, QDir::currentPath(), m_page->mainFrame(), m_config.remoteDebugAutorun())) {
+            if (!Utils::loadJSForDebug(m_config.scriptFile(), m_config.scriptLanguage(), m_scriptFileEnc, QDir::currentPath(), m_page->mainFrame(), m_config.remoteDebugAutorun())) {
                 m_returnValue = -1;
                 return false;
             }
             m_page->showInspector(m_config.remoteDebugPort());
         } else {
-            if (!Utils::injectJsInFrame(m_config.scriptFile(), m_scriptFileEnc, QDir::currentPath(), m_page->mainFrame(), true)) {
+            if (!Utils::injectJsInFrame(m_config.scriptFile(), m_config.scriptLanguage(), m_scriptFileEnc, QDir::currentPath(), m_page->mainFrame(), true)) {
                 m_returnValue = -1;
                 return false;
             }
@@ -187,17 +242,12 @@ int Phantom::returnValue() const
 
 QString Phantom::libraryPath() const
 {
-   return m_page->libraryPath();
+    return m_page->libraryPath();
 }
 
 void Phantom::setLibraryPath(const QString &libraryPath)
 {
-   m_page->setLibraryPath(libraryPath);
-}
-
-QString Phantom::scriptName() const
-{
-    return QFileInfo(m_config.scriptFile()).fileName();
+    m_page->setLibraryPath(libraryPath);
 }
 
 QVariantMap Phantom::version() const
@@ -214,21 +264,53 @@ QObject *Phantom::page() const
     return m_page;
 }
 
+Config *Phantom::config()
+{
+    return &m_config;
+}
+
 bool Phantom::printDebugMessages() const
 {
     return m_config.printDebugMessages();
 }
 
+bool Phantom::areCookiesEnabled() const
+{
+    return m_defaultCookieJar->isEnabled();
+}
+
+void Phantom::setCookiesEnabled(const bool value)
+{
+    if (value) {
+        m_defaultCookieJar->enable();
+    } else {
+        m_defaultCookieJar->disable();
+    }
+}
+
+bool Phantom::webdriverMode() const
+{
+    return m_config.isWebdriverMode();
+}
+
 // public slots:
+QObject *Phantom::createCookieJar(const QString& filePath) {
+    return new CookieJar(filePath, this);
+}
+
 QObject *Phantom::createWebPage()
 {
-    WebPage *page = new WebPage(this, &m_config);
-    m_pages.append(page);
-    page->applySettings(m_defaultPageSettings);
-    page->setLibraryPath(QFileInfo(m_config.scriptFile()).dir().absolutePath());
+    WebPage *page = new WebPage(this);
+    page->setCookieJar(m_defaultCookieJar);
 
+    // Store pointer to the page for later cleanup
+    m_pages.append(page);
+    // Apply default settings to the page
+    page->applySettings(m_defaultPageSettings);
+
+    // Show web-inspector if in debug mode
     if (m_config.debug()) {
-      page->showInspector(m_config.remoteDebugPort());
+        page->showInspector(m_config.remoteDebugPort());
     }
 
     return page;
@@ -236,11 +318,8 @@ QObject *Phantom::createWebPage()
 
 QObject* Phantom::createWebServer()
 {
-    WebServer *server = new WebServer(this, &m_config);
+    WebServer *server = new WebServer(this);
     m_servers.append(server);
-    ///TODO:
-//     page->applySettings(m_defaultPageSettings);
-//     page->setLibraryPath(QFileInfo(m_config.scriptFile()).dir().absolutePath());
     return server;
 }
 
@@ -266,24 +345,73 @@ QObject *Phantom::createSystem()
     return m_system;
 }
 
+QObject *Phantom::_createChildProcess()
+{
+    if (!m_childprocess) {
+        m_childprocess = new ChildProcess(this);
+    }
+
+    return m_childprocess;
+}
+
 QObject* Phantom::createCallback()
 {
     return new Callback(this);
 }
 
-QString Phantom::loadModuleSource(const QString &name)
+void Phantom::loadModule(const QString &moduleSource, const QString &filename)
 {
-    QString moduleSource;
-    QString moduleSourceFilePath = ":/modules/" + name + ".js";
+    if (m_terminated)
+        return;
 
-    moduleSource = Utils::readResourceFileUtf8(moduleSourceFilePath);
-
-    return moduleSource;
+   QString scriptSource =
+      "(function(require, exports, module) {" +
+      moduleSource +
+      "}.call({}," +
+      "require.cache['" + filename + "']._getRequire()," +
+      "require.cache['" + filename + "'].exports," +
+      "require.cache['" + filename + "']" +
+      "));";
+   m_page->mainFrame()->evaluateJavaScript(scriptSource, "");
 }
 
 bool Phantom::injectJs(const QString &jsFilePath)
 {
-    return Utils::injectJsInFrame(jsFilePath, libraryPath(), m_page->mainFrame());
+    QString pre = "";
+    qDebug() << "Phantom - injectJs:" << jsFilePath;
+
+    // If in Remote Webdriver Mode, we need to manipulate the PATH, to point it to a resource in `ghostdriver.qrc`
+    if (webdriverMode()) {
+        pre = ":/ghostdriver/";
+        qDebug() << "Phantom - injectJs: prepending" << pre;
+    }
+
+    if (m_terminated)
+        return false;
+
+    return Utils::injectJsInFrame(pre + jsFilePath, libraryPath(), m_page->mainFrame());
+}
+
+void Phantom::setProxy(const QString &ip, const qint64 &port, const QString &proxyType, const QString &user, const QString &password)
+{
+    qDebug() << "Set " << proxyType << " proxy to: " << ip << ":" << port;
+    if (ip.isEmpty()) {
+        QNetworkProxyFactory::setUseSystemConfiguration(true);
+    } else {
+        QNetworkProxy::ProxyType networkProxyType = QNetworkProxy::HttpProxy;
+
+        if (proxyType == "socks5") {
+            networkProxyType = QNetworkProxy::Socks5Proxy;
+        }
+        // Checking for passed proxy user and password
+        if(!user.isEmpty() && !password.isEmpty()) {
+            QNetworkProxy proxy(networkProxyType, ip, port, user, password);
+            QNetworkProxy::setApplicationProxy(proxy);
+        } else {
+            QNetworkProxy proxy(networkProxyType, ip, port);
+            QNetworkProxy::setApplicationProxy(proxy);
+        }
+    }
 }
 
 void Phantom::exit(int code)
@@ -313,39 +441,60 @@ void Phantom::onInitialized()
 
     // Bootstrap the PhantomJS scope
     m_page->mainFrame()->evaluateJavaScript(
-        Utils::readResourceFileUtf8(":/bootstrap.js"),
-        QString("phantomjs://bootstrap.js")
-    );
+                Utils::readResourceFileUtf8(":/bootstrap.js"),
+                QString("phantomjs://bootstrap.js")
+                );
 }
+
+bool Phantom::setCookies(const QVariantList &cookies)
+{
+    // Delete all the cookies from the CookieJar
+    m_defaultCookieJar->clearCookies();
+    // Add a new set of cookies
+    return m_defaultCookieJar->addCookiesFromMap(cookies);
+}
+
+QVariantList Phantom::cookies() const
+{
+    // Return all the Cookies in the CookieJar, as a list of Maps (aka JSON in JS space)
+    return m_defaultCookieJar->cookiesToMap();
+}
+
+bool Phantom::addCookie(const QVariantMap &cookie)
+{
+    return m_defaultCookieJar->addCookieFromMap(cookie);
+}
+
+bool Phantom::deleteCookie(const QString &cookieName)
+{
+    if (!cookieName.isEmpty()) {
+        return m_defaultCookieJar->deleteCookie(cookieName);
+    }
+    return false;
+}
+
+void Phantom::clearCookies()
+{
+    m_defaultCookieJar->clearCookies();
+}
+
 
 // private:
 void Phantom::doExit(int code)
 {
-    if (m_config.debug())
-    {
-        Utils::cleanupFromDebug();
-    }
-
     emit aboutToExit(code);
     m_terminated = true;
     m_returnValue = code;
-    qDeleteAll(m_pages);
+    foreach (QPointer<WebPage> page, m_pages) {
+        if (!page)
+            continue;
+
+        // stop processing of JavaScript code by loading a blank page
+        page->mainFrame()->setUrl(QUrl(QStringLiteral("about:blank")));
+        // delay deletion into the event loop, direct deletion can trigger crashes
+        page->deleteLater();
+    }
     m_pages.clear();
     m_page = 0;
     QApplication::instance()->exit(code);
-}
-
-void Phantom::initCompletions()
-{
-    // Add completion for the Dynamic Properties of the 'phantom' object
-    // properties
-    addCompletion("args");
-    addCompletion("defaultPageSettings");
-    addCompletion("libraryPath");
-    addCompletion("outputEncoding");
-    addCompletion("scriptName");
-    addCompletion("version");
-    // functions
-    addCompletion("exit");
-    addCompletion("injectJs");
 }
